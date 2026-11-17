@@ -355,6 +355,49 @@
     );
   }
 
+  // The fit as a picture, built as one SVG string (the page's element helper makes HTML
+  // elements, and SVG needs its own namespace, so the chart is composed as markup and set
+  // as inner HTML). Axes are log-log: each live-token protocol is a point at its real TVL
+  // and market cap, the solid line is the fitted law exp(a) x TVL^b, and the dashed line is
+  // the flat 0.25 x TVL baseline. The vertical gap between the two lines at a protocol's
+  // size is exactly the disagreement the validation numbers summarise.
+  function fitChart() {
+    var f = DATA.fit;
+    var pts = DATA.live.filter(function (r) { return r.mcap_usd !== null && r.mcap_usd > 0 && r.tvl_usd > 0; });
+    if (pts.length < 3) return '';
+    var W = 640, H = 250, L = 10, R = 10, T = 10, B = 26;
+    var xs = pts.map(function (r) { return Math.log10(r.tvl_usd); });
+    var ys = pts.map(function (r) { return Math.log10(r.mcap_usd); });
+    var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+    var y0 = Math.min.apply(null, ys.concat([Math.log10(Math.exp(f.a) * Math.pow(Math.pow(10, x0), f.b)), Math.log10(0.25 * Math.pow(10, x0))]));
+    var y1 = Math.max.apply(null, ys.concat([Math.log10(Math.exp(f.a) * Math.pow(Math.pow(10, x1), f.b)), Math.log10(0.25 * Math.pow(10, x1))]));
+    var pad = (y1 - y0) * 0.08; y0 -= pad; y1 += pad;
+    function px(x) { return (L + (x - x0) / (x1 - x0) * (W - L - R)).toFixed(1); }
+    function py(y) { return (T + (y1 - y) / (y1 - y0) * (H - T - B)).toFixed(1); }
+    function lawPath(mult) {
+      var d = '';
+      for (var i = 0; i <= 24; i++) {
+        var lx = x0 + (x1 - x0) * i / 24;
+        var tvl = Math.pow(10, lx);
+        var ly = Math.log10(mult === null ? Math.exp(f.a) * Math.pow(tvl, f.b) : mult * tvl);
+        d += (i === 0 ? 'M' : 'L') + px(lx) + ' ' + py(ly) + ' ';
+      }
+      return d.trim();
+    }
+    var circles = pts.map(function (r) {
+      return '<circle cx="' + px(Math.log10(r.tvl_usd)) + '" cy="' + py(Math.log10(r.mcap_usd)) + '" r="3.5" fill="#c2410c" fill-opacity="0.75"><title>' + r.name + ': TVL ' + fmtUsd(r.tvl_usd) + ', market cap ' + fmtUsd(r.mcap_usd) + '</title></circle>';
+    }).join('');
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Log-log scatter of live-token market cap against TVL, with the fitted power law and the flat baseline">' +
+      '<path d="' + lawPath(0.25) + '" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 4"/>' +
+      '<path d="' + lawPath(null) + '" fill="none" stroke="#111827" stroke-width="2"/>' +
+      circles +
+      '<text x="' + (W - R) + '" y="' + (H - 8) + '" text-anchor="end" font-size="11" fill="#6b7280">log TVL, smallest to largest live protocol</text>' +
+      '<text x="' + L + '" y="' + (T + 4) + '" font-size="11" fill="#111827">— fitted power law</text>' +
+      '<text x="' + L + '" y="' + (T + 20) + '" font-size="11" fill="#6b7280">- - flat 0.25 x TVL</text>' +
+      '<text x="' + L + '" y="' + (T + 36) + '" font-size="11" fill="#c2410c">• live tokens, market cap as recorded</text>' +
+      '</svg>';
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var f = DATA.fit;
@@ -371,6 +414,8 @@
       el('div', { class: 'formula' },
         'implied = round( exp(a) x tvl_usd^b x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') ), with a = ' + f.a.toFixed(4) + ' and b = ' + f.b.toFixed(4)
       ),
+      el('div', { class: 'fitchart', html: fitChart() }),
+      el('p', { class: 'sub', text: 'The fit, drawn: every live-token protocol in the snapshot as a point (log TVL against log market cap), the fitted law through them, and the flat baseline it beat. The law bends below the baseline at large TVL — that bend is the whole model.' }),
       el('p', { class: 'sub', text: 'Every row is scored by this one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. Because b is below 1, implied value grows slower than TVL: a protocol ten times larger is priced about ' + Math.pow(10, f.b).toFixed(1) + ' times higher, not ten times, which is why this board is not just the TVL table re-sorted.' }),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown. Open any row: the page recomputes its implied value from these same numbers and checks it against the board.' })
     );

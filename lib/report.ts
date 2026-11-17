@@ -115,6 +115,17 @@ export function buildReport(snapshot: Snapshot, radar: RadarData, board: BoardRo
     lines.push(`| ${r.rank} | ${r.name} | ${r.category ?? '—'} | ${usd(r.tvl_usd)} | ${pct(r.change_7d)} | ${usd(r.implied_value_usd)} | ${fixed((r.implied_value_usd / r.tvl_usd) * 100, 1)}% |`);
   }
   lines.push('');
+  lines.push('## The watchlist, in full');
+  lines.push('');
+  lines.push('The forty protocols the brief guarantees a place to — TVL at or above the floor and no token on record — with the rank the model gives each. A watchlist protocol the model prices low is still here: coverage is the floor, the ranking is the model\'s opinion, and the two are never traded against each other.');
+  lines.push('');
+  lines.push('| Rank | Protocol | Category | TVL | Implied value | % of TVL |');
+  lines.push('|---|---|---|---|---|---|');
+  const watchlistRows = board.filter((r) => snapshot.watchlist.includes(r.slug));
+  for (const r of watchlistRows) {
+    lines.push(`| ${r.rank} | ${r.name} | ${r.category ?? '—'} | ${usd(r.tvl_usd)} | ${usd(r.implied_value_usd)} | ${fixed((r.implied_value_usd / r.tvl_usd) * 100, 1)}% |`);
+  }
+  lines.push('');
   lines.push('Every row of board.json carries the same breakdown the dashboard recomputes in the page — the fitted a and b, the growth and maturity multipliers — plus a farm plan derived from that protocol\'s own category, first chain, TVL and age. Implied value is a model, not a promise: it prices what a launch would be worth if this protocol\'s token were valued the way the snapshot\'s live tokens are valued at its size.');
   lines.push('');
   return lines.join('\n');

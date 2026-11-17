@@ -99,6 +99,8 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 
 .model { margin-top: var(--step-4); margin-bottom: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+.fitchart { margin-top: var(--step-3); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); padding: var(--step-2); }
+.fitchart svg { display: block; width: 100%; height: auto; }
 .verdict {
   border-left: 3px solid var(--accent); padding: var(--step-2) var(--step-3);
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
