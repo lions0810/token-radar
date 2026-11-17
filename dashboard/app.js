@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, compare: false };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -36,6 +36,37 @@
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     return Math.max(1, Math.round(Math.exp(fit.a) * Math.pow(row.tvl_usd, fit.b) * growthMult * maturity));
+  }
+
+  // The starter baseline, recomputed in the page for the compare view: the flat 0.25 x TVL
+  // with the same growth and maturity multipliers the row already carries in data.js, so the
+  // only difference on screen is the pricing law itself. A row's flat rank is its place in the
+  // whole board under that baseline, and the delta against its radar-2 rank is the visible
+  // answer to "what does the power law actually change?".
+  var FLAT_MULTIPLE = 0.25;
+  function flatImpliedOf(row) {
+    return Math.max(1, Math.round(row.tvl_usd * FLAT_MULTIPLE * row.growth_multiplier * row.maturity_multiplier));
+  }
+  var flatRankCache = null;
+  function flatRankOf(slug) {
+    if (flatRankCache === null) {
+      flatRankCache = {};
+      DATA.rows
+        .map(function (r) { return { slug: r.slug, flat: flatImpliedOf(r) }; })
+        .sort(function (x, y) { return y.flat - x.flat || (x.slug < y.slug ? -1 : 1); })
+        .forEach(function (r, i) { flatRankCache[r.slug] = i + 1; });
+    }
+    return flatRankCache[slug];
+  }
+  function compareCell(r) {
+    var flatRank = flatRankOf(r.slug);
+    var delta = flatRank - r.rank;
+    var deltaText = delta === 0 ? 'same rank' : delta > 0 ? 'up ' + delta + ' vs flat' : 'down ' + (-delta) + ' vs flat';
+    var deltaClass = delta === 0 ? 'sub' : delta > 0 ? 'pos' : 'neg';
+    return el('td', null, el('div', { class: 'name' },
+      el('b', { class: 'num', text: fmtUsd(flatImpliedOf(r)) }),
+      el('span', { class: deltaClass, text: 'flat rank ' + flatRank + ' - ' + deltaText })
+    ));
   }
 
   function el(tag, attrs) {
@@ -216,10 +247,15 @@
     }
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
+    // The compare toggle adds the flat-baseline column to the pre-token board. It belongs to
+    // that board alone, so on the Live token tab it is disabled like search and category.
+    var compare = el('button', { type: 'button', 'aria-pressed': state.compare ? 'true' : 'false', text: state.compare ? 'On' : 'Off', onclick: function () { state.compare = !state.compare; render(); } });
+    if (state.tab === 'live') compare.setAttribute('disabled', '');
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Compare flat 0.25x' }), el('div', { class: 'tabs' }, compare)),
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols (search and category apply to the pre-token board)' })
     );
   }
@@ -268,6 +304,7 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
+        state.compare ? compareCell(r) : null,
         el('td', null, el('span', { class: 'status', text: 'no token' }))
       );
       tbody.appendChild(tr);
@@ -286,6 +323,7 @@
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
+            state.compare ? el('th', { scope: 'col', text: 'Flat 0.25x baseline' }) : null,
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody
