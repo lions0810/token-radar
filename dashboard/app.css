@@ -93,7 +93,14 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 .neg { color: var(--negative); }
 .bar { width: 120px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--border) 60%, var(--surface)); overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--accent); }
-.implied { display: flex; align-items: center; gap: var(--step-2); }
+.implied { display: flex; align-items: center; gap: var(--step-3); }
+.range { position: relative; width: 120px; height: 8px; border-radius: 4px; background: color-mix(in srgb, var(--border) 60%, var(--surface)); flex: none; }
+.range-seg { position: absolute; top: 2px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 38%, var(--surface)); }
+.range-dot { position: absolute; top: 1px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); transform: translateX(-50%); }
+.tested { margin-top: var(--step-3); display: grid; gap: var(--step-2); }
+.tested table { font-size: 13px; }
+.tested .inuse { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.tested tr.inuse-row td { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 

@@ -27,15 +27,17 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
   // The model in one function: the page recomputes a row from the snapshot figures and the fitted
-  // power law in data.js (fit.a and fit.b at full precision, exactly the numbers main.ts scored
-  // with) and checks the number board.json carries, so the page's code and the board's data are
-  // visibly the same arithmetic: implied = round(exp(a) x tvl^b x growthMult x maturityMult).
+  // model in data.js (fit.a and fit.b at full precision and the row's own category adjustment,
+  // exactly the numbers main.ts scored with) and checks the number board.json carries, so the
+  // page's code and the board's data are visibly the same arithmetic:
+  // implied = round(exp(a + b x log(tvl) + adj) x growthMult x maturityMult).
   function impliedOf(row, model, fit) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    return Math.max(1, Math.round(Math.exp(fit.a) * Math.pow(row.tvl_usd, fit.b) * growthMult * maturity));
+    var adj = row.shrink_adj || 0;
+    return Math.max(1, Math.round(Math.exp(fit.a + fit.b * Math.log(row.tvl_usd) + adj) * growthMult * maturity));
   }
 
   // The starter baseline, recomputed in the page for the compare view: the flat 0.25 x TVL
@@ -212,12 +214,12 @@
 
   function lede() {
     var f = DATA.fit;
-    var looGain = Math.round((1 - f.loo_mean_abs_log_error / f.flat_025_mean_abs_log_error) * 100);
+    var looGain = Math.round((1 - f.shrink_loo_mean_abs_log_error / f.flat_025_mean_abs_log_error) * 100);
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.board_size + ' pre-token protocols, ranked by implied value' }),
-        el('p', { text: 'Every one of the ' + DATA.watchlist_size + ' watchlist protocols is covered: the watchlist is the floor, every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value comes from a power law fitted to tokens that already trade, not from a flat multiple of TVL. It is a model, not a promise.' }),
-        el('p', { class: 'verdict', text: 'Validated out of sample: leave-one-out error ' + f.loo_mean_abs_log_error.toFixed(3) + ' for the fitted power law against ' + f.flat_025_mean_abs_log_error.toFixed(3) + ' for flat 0.25 x TVL, ' + looGain + '% lower, on the same ' + f.n + ' live-token protocols. Full model below the board summary, before the table.' })
+        el('p', { text: 'Every one of the ' + DATA.watchlist_size + ' watchlist protocols is covered: the watchlist is the floor, every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor. Implied value comes from a power law fitted to tokens that already trade, with a shrunk category adjustment, not from a flat multiple of TVL. It is a model, not a promise.' }),
+        el('p', { class: 'verdict', text: 'Validated out of sample: leave-one-out error ' + f.shrink_loo_mean_abs_log_error.toFixed(3) + ' for the shipped model against ' + f.flat_025_mean_abs_log_error.toFixed(3) + ' for flat 0.25 x TVL, ' + looGain + '% lower, on the same ' + f.n + ' live-token protocols. Full model below the board summary, before the table.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -225,7 +227,7 @@
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Power law fitted on' }), el('b', { text: f.n + ' live tokens' })),
-        el('div', { class: 'fact' }, el('span', { text: 'LOO error, power law vs flat' }), el('b', { text: f.loo_mean_abs_log_error.toFixed(3) + ' vs ' + f.flat_025_mean_abs_log_error.toFixed(3) }))
+        el('div', { class: 'fact' }, el('span', { text: 'LOO error, shipped model vs flat' }), el('b', { text: f.shrink_loo_mean_abs_log_error.toFixed(3) + ' vs ' + f.flat_025_mean_abs_log_error.toFixed(3) }))
       )
     );
   }
@@ -278,10 +280,16 @@
         el('button', { class: 'button primary', type: 'button', text: 'Clear filters', onclick: function () { state.q = ''; state.category = 'all'; writeHash(); render(); } })
       ));
     }
-    // Bars are shares of the whole board's top implied value, not of whatever row the current
-    // sort happens to put first: with a name or TVL sort the first row is not the maximum, and
-    // the old code drew bars over 100% or shrunk them all.
-    var max = DATA.rows.reduce(function (m, r) { return Math.max(m, r.implied_value_usd); }, 1);
+    // The range track is a log scale over the whole board's implied range, the same scale for
+    // every row whatever the current sort or filter: the shaded segment is the row's P25-P75
+    // range and the dot is its point estimate, so a row's uncertainty is comparable at a glance.
+    // A range can run past the board's own maximum (the top row's P75 is above its estimate's
+    // rank-1 value), so the segment is clamped at the track's right edge.
+    var minV = DATA.rows.reduce(function (m, r) { return Math.min(m, r.implied_value_usd); }, Infinity);
+    var maxV = DATA.rows.reduce(function (m, r) { return Math.max(m, r.implied_value_usd); }, 1);
+    var logMin = Math.log(minV);
+    var logSpan = Math.log(maxV) - logMin || 1;
+    function rangePct(v) { return (Math.log(Math.max(1, v)) - logMin) / logSpan * 100; }
     var tbody = el('tbody');
     list.forEach(function (r) {
       var growth = r.change_7d === null ? 'n/a' : fmtPct(r.change_7d);
@@ -301,7 +309,10 @@
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
         el('td', null, el('div', { class: 'implied' },
-          el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
+          el('div', { class: 'range', 'aria-hidden': 'true' },
+            el('i', { class: 'range-seg', style: 'left:' + rangePct(r.value_low_usd).toFixed(1) + '%;width:' + Math.max(1.5, Math.min(100, rangePct(r.value_high_usd)) - rangePct(r.value_low_usd)).toFixed(1) + '%' }),
+            el('i', { class: 'range-dot', style: 'left:' + rangePct(r.implied_value_usd).toFixed(1) + '%' })
+          ),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
         state.compare ? compareCell(r) : null,
@@ -398,24 +409,58 @@
       '</svg>';
   }
 
+  function modelsTested() {
+    var f = DATA.fit;
+    function row(name, mean, median, inUse) {
+      return el('tr', inUse ? { class: 'inuse-row' } : null,
+        el('td', { text: name }),
+        el('td', { class: 'num', text: mean.toFixed(3) }),
+        el('td', { class: 'num', text: median.toFixed(3) }),
+        el('td', null, inUse ? el('span', { class: 'inuse', text: 'in use' }) : null)
+      );
+    }
+    return el('div', { class: 'tested' },
+      el('h3', { text: 'Models tested' }),
+      el('p', { class: 'sub', text: 'Every candidate was priced leave-one-out on the same ' + f.n + ' live-token protocols by the program at run time: each protocol priced by a model refitted without it, error measured as absolute log error against its real market cap.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Model' }),
+            el('th', { scope: 'col', text: 'LOO mean |log error|' }),
+            el('th', { scope: 'col', text: 'LOO median |log error|' }),
+            el('th', { scope: 'col', text: '' })
+          )),
+          el('tbody', null,
+            row('Flat 0.25 x TVL (starter)', f.flat_025_mean_abs_log_error, f.flat_025_median_abs_log_error, false),
+            row('Category-median comps', f.category_median_mean_abs_log_error, f.category_median_median_abs_log_error, false),
+            row('Power law (radar-2)', f.loo_mean_abs_log_error, f.loo_median_abs_log_error, false),
+            row('Power law + category shrinkage (radar-3)', f.shrink_loo_mean_abs_log_error, f.shrink_loo_median_abs_log_error, true)
+          )
+        )
+      )
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var f = DATA.fit;
-    var looGain = Math.round((1 - f.loo_mean_abs_log_error / f.flat_025_mean_abs_log_error) * 100);
+    var looGain = Math.round((1 - f.shrink_loo_mean_abs_log_error / f.flat_025_mean_abs_log_error) * 100);
     return el('section', { class: 'panel model' },
-      el('h2', { text: 'The model: a fitted power law, validated out of sample' }),
-      el('p', { class: 'verdict', text: 'Radar-2 does not price a pre-token protocol at a flat share of its TVL. It fits how tokens that already trade are actually priced, then applies that law. Leave-one-out validation on the fit sample: power law ' + f.loo_mean_abs_log_error.toFixed(3) + ' mean log error, flat 0.25 x TVL ' + f.flat_025_mean_abs_log_error.toFixed(3) + ' — the fitted law is ' + looGain + '% more accurate out of sample.' }),
+      el('h2', { text: 'The model: a fitted power law with category shrinkage, validated out of sample' }),
+      el('p', { class: 'verdict', text: 'Radar-3 does not price a pre-token protocol at a flat share of its TVL. It fits how tokens that already trade are actually priced, applies that law, then adjusts each category by its own shrunk average residual. Leave-one-out validation on the fit sample: shipped model ' + f.shrink_loo_mean_abs_log_error.toFixed(3) + ' mean log error, the plain power law ' + f.loo_mean_abs_log_error.toFixed(3) + ', flat 0.25 x TVL ' + f.flat_025_mean_abs_log_error.toFixed(3) + ' — the shipped model is ' + looGain + '% more accurate than the flat baseline out of sample.' }),
       el('div', { class: 'validation' },
         el('div', { class: 'vstat' }, el('span', { text: 'Fitted power law' }), el('b', { text: 'a = ' + f.a.toFixed(3) + ', b = ' + f.b.toFixed(3) }), el('span', { class: 'sub', text: 'log(market cap) = a + b x log(TVL)' })),
         el('div', { class: 'vstat' }, el('span', { text: 'Fit sample' }), el('b', { text: 'n = ' + f.n + ' live tokens' }), el('span', { class: 'sub', text: 'mcap and TVL above zero, mcap/TVL 0.001 to 20, R-squared ' + f.r_squared.toFixed(3) })),
-        el('div', { class: 'vstat' }, el('span', { text: 'LOO error, power law' }), el('b', { text: f.loo_mean_abs_log_error.toFixed(3) + ' mean' }), el('span', { class: 'sub', text: 'median ' + f.loo_median_abs_log_error.toFixed(3) + ', each protocol held out and refitted' })),
+        el('div', { class: 'vstat' }, el('span', { text: 'LOO error, shipped model' }), el('b', { text: f.shrink_loo_mean_abs_log_error.toFixed(3) + ' mean' }), el('span', { class: 'sub', text: 'median ' + f.shrink_loo_median_abs_log_error.toFixed(3) + ', power law + shrinkage, each protocol held out and refitted' })),
         el('div', { class: 'vstat' }, el('span', { text: 'LOO error, flat 0.25 x TVL' }), el('b', { text: f.flat_025_mean_abs_log_error.toFixed(3) + ' mean' }), el('span', { class: 'sub', text: 'median ' + f.flat_025_median_abs_log_error.toFixed(3) + ', the starter baseline on the same protocols' }))
       ),
       el('div', { class: 'formula' },
-        'implied = round( exp(a) x tvl_usd^b x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') ), with a = ' + f.a.toFixed(4) + ' and b = ' + f.b.toFixed(4)
+        'implied = round( exp(a + b x log(tvl_usd) + adj) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') ), with a = ' + f.a.toFixed(4) + ', b = ' + f.b.toFixed(4) + ' and adj the row\'s category adjustment: (n / (n + ' + f.shrink_k + ')) x the category\'s mean residual over its n live protocols, 0 when a category has none'
       ),
       el('div', { class: 'fitchart', html: fitChart() }),
       el('p', { class: 'sub', text: 'The fit, drawn: every live-token protocol in the snapshot as a point (log TVL against log market cap), the fitted law through them, and the flat baseline it beat. The law bends below the baseline at large TVL — that bend is the whole model.' }),
+      modelsTested(),
+      el('p', { class: 'sub', text: 'Every row also carries a P25-P75 range, drawn as the shaded segment in its value cell: the point estimate scaled by the middle half of the model\'s own leave-one-out residuals (log-space q25 = ' + f.interval.q25.toFixed(2) + ', q75 = +' + f.interval.q75.toFixed(2) + '; ' + Math.round(f.interval.coverage * 100) + '% of held-out protocols landed inside their range, against the 50% the quartiles promise). The range is the model\'s measured uncertainty, not a confidence claim.' }),
       el('p', { class: 'sub', text: 'Every row is scored by this one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. Because b is below 1, implied value grows slower than TVL: a protocol ten times larger is priced about ' + Math.pow(10, f.b).toFixed(1) + ' times higher, not ten times, which is why this board is not just the TVL table re-sorted.' }),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, by TVL, and the live-token protocols are set aside with their market caps shown. Open any row: the page recomputes its implied value from these same numbers and checks it against the board.' })
     );
@@ -446,12 +491,14 @@
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Power-law base, exp(a) x TVL^b' }), el('b', { class: 'num', text: fmtUsd(Math.exp(DATA.fit.a) * Math.pow(row.tvl_usd, DATA.fit.b)) })),
+        el('div', null, el('span', { text: 'Category adjustment, ' + (row.category || 'Other') + ' (' + row.category_live_n + ' live in the fit)' }), el('b', { class: 'num', text: 'x ' + Math.exp(row.shrink_adj || 0).toFixed(3) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'P25-P75 range' }), el('b', { class: 'num', text: fmtUsd(row.value_low_usd) + ' – ' + fmtUsd(row.value_high_usd) })),
         el('div', null, el('span', { text: 'Implied as share of TVL' }), el('b', { class: 'num', text: (row.tvl_usd > 0 ? (row.implied_value_usd / row.tvl_usd * 100).toFixed(1) + '%' : 'n/a') }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ' (power law a = ' + DATA.fit.a.toFixed(4) + ', b = ' + DATA.fit.b.toFixed(4) + ', fitted on n = ' + DATA.fit.n + ' live-token protocols): the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, DATA.fit)) + (impliedOf(row, DATA.model, DATA.fit) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ' (power law a = ' + DATA.fit.a.toFixed(4) + ', b = ' + DATA.fit.b.toFixed(4) + ', fitted on n = ' + DATA.fit.n + ' live-token protocols, category residuals shrunk with k = ' + DATA.fit.shrink_k + '): the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model, DATA.fit)) + (impliedOf(row, DATA.model, DATA.fit) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' The range is the estimate scaled by the middle half of the model\'s leave-one-out residuals. This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),

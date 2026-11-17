@@ -6,23 +6,29 @@
 // snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed into
 // the ranked board.
 //
-// Implied value follows only from the snapshot's own figures (radar-2):
+// Implied value follows only from the snapshot's own figures (radar-3):
 //
 //   fit        = log-log power law fitted at runtime to the snapshot's own live-token protocols:
 //                log(mcap_usd) = a + b x log(tvl_usd), fitted by ordinary least squares on the
 //                protocols with mcap_usd > 0, tvl_usd > 0 and 0.001 <= mcap_usd / tvl_usd <= 20
 //                (the mcap_usd = -1 placeholder row and mcap_usd = 0 rows fail mcap_usd > 0)
-//   base       = exp(a) x tvl_usd ^ b
+//   shrink     = a category adjustment on top of the law: for each category c, r_c is the mean
+//                residual log(mcap_usd) - (a + b x log(tvl_usd)) over the fit sample's live
+//                members of c, and a row in category c gets adj = (n_c / (n_c + K)) x r_c with
+//                K = 10 fixed a priori (0 when the category has no live members)
+//   base       = exp(a + b x log(tvl_usd) + adj)
 //   growth     = clamp(change_7d, -60, 120) per cent
 //   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
 //   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age_days unknown: 365)
 //   implied    = max(1, round(base x growthMult x maturity))
+//   range      = [round(implied x exp(q25)), round(implied x exp(q75))], the empirical quartiles
+//                of the shipped model's own leave-one-out residuals (see PowerLawFit.interval)
 //
 // The growth and maturity adjustments are the starter's, unchanged. The power law replaces the
-// starter's flat 0.25 x TVL base: on the sealed snapshot it validates better out of sample
-// (leave-one-out, see PowerLawFit). No protocol name is ever special-cased: the same fitted
-// function scores every row, and the fit is recomputed deterministically from the snapshot
-// on every run, never hard-coded.
+// starter's flat 0.25 x TVL base, and radar-3 adds the shrunk category adjustment: on the sealed
+// snapshot both validate better out of sample than the flat base (leave-one-out, see PowerLawFit).
+// No protocol name is ever special-cased: the same fitted function scores every row, and the fit
+// is recomputed deterministically from the snapshot on every run, never hard-coded.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -69,14 +75,25 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** The category shrinkage constant: adj_c = (n_c / (n_c + SHRINK_K)) x mean residual. Fixed a priori. */
+export const SHRINK_K = 10;
+
+/** The shrinkage applied to the category-median comps model in validation: medians are pulled
+ *  toward the global median with weight n_c / (n_c + CATEGORY_MEDIAN_SHRINK). */
+export const CATEGORY_MEDIAN_SHRINK = 5;
 
 /**
- * The power-law fit radar-2 scores with, fitted from the snapshot itself (see fitPowerLaw).
- * `a` and `b` are carried at full precision: the dashboard recomputes every row from them and
- * the number must match board.json exactly. The validation fields are summaries, rounded to
- * 6 decimals: leave-one-out mean and median absolute log error of the power law, and the same
- * errors for the starter's flat 0.25 x TVL base on the same held-out protocols.
+ * The fit radar-3 scores with, fitted from the snapshot itself (see fitPowerLaw).
+ * `a`, `b` and the per-category adjustments are carried at full precision: the dashboard
+ * recomputes every row from them and the number must match board.json exactly. The validation
+ * fields are summaries, rounded to 6 decimals: leave-one-out mean and median absolute log error
+ * for the shipped model (power law + category shrinkage), the plain power law, the starter's
+ * flat 0.25 x TVL base, and the category-median comps model, each on the same held-out protocols.
+ * `interval` carries the empirical quartiles of the shipped model's leave-one-out residuals and
+ * the share of those residuals inside them; every board row's range is its implied value scaled
+ * by exp(q25) and exp(q75).
  */
 export interface PowerLawFit {
   a: number;
@@ -87,6 +104,13 @@ export interface PowerLawFit {
   loo_median_abs_log_error: number;
   flat_025_mean_abs_log_error: number;
   flat_025_median_abs_log_error: number;
+  shrink_k: number;
+  shrink_loo_mean_abs_log_error: number;
+  shrink_loo_median_abs_log_error: number;
+  category_median_mean_abs_log_error: number;
+  category_median_median_abs_log_error: number;
+  interval: { q25: number; q75: number; coverage: number };
+  category_adj: Record<string, { n: number; adj: number }>;
 }
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
@@ -118,11 +142,15 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  value_low_usd: number;
+  value_high_usd: number;
   model: {
     fit_a: number;
     fit_b: number;
     fit_n: number;
     base_value_usd: number;
+    shrink_adj: number;
+    category_live_n: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -144,6 +172,10 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  value_low_usd: number;
+  value_high_usd: number;
+  shrink_adj: number;
+  category_live_n: number;
   growth_multiplier: number;
   maturity_multiplier: number;
 }
@@ -223,6 +255,41 @@ function median(values: number[]): number {
 
 const round6 = (n: number): number => Math.round(n * 1e6) / 1e6;
 
+/** The category a protocol is grouped under for shrinkage: its recorded category, else 'Other'. */
+function categoryKey(p: SnapshotProtocol): string {
+  return p.category ?? 'Other';
+}
+
+/** The empirical quantile of a sorted list: the element at floor(p x n), clamped to the list. */
+function quantileFloor(sorted: number[], p: number): number {
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
+  return sorted[idx]!;
+}
+
+/**
+ * The category adjustments of one fitted law over one training set: for each category, the mean
+ * residual log(mcap) - (a + b x log(tvl)) of its members, shrunk toward zero by n / (n + k).
+ * A category with no members is absent from the map and adjusts by 0.
+ */
+function categoryAdjustments(train: SnapshotProtocol[], a: number, b: number, k: number): Map<string, { n: number; adj: number }> {
+  const sums = new Map<string, { n: number; sum: number }>();
+  for (const p of train) {
+    const key = categoryKey(p);
+    const residual = Math.log(p.mcap_usd!) - (a + b * Math.log(p.tvl_usd));
+    const entry = sums.get(key);
+    if (entry === undefined) sums.set(key, { n: 1, sum: residual });
+    else {
+      entry.n += 1;
+      entry.sum += residual;
+    }
+  }
+  const out = new Map<string, { n: number; adj: number }>();
+  for (const [key, entry] of sums) {
+    out.set(key, { n: entry.n, adj: (entry.n / (entry.n + k)) * (entry.sum / entry.n) });
+  }
+  return out;
+}
+
 /**
  * The live-token protocols the power law is fitted on, in snapshot order: a recorded market cap
  * above zero (so the mcap_usd = -1 placeholder row and the mcap_usd = 0 rows are out), a TVL
@@ -238,9 +305,11 @@ export function fitSample(snapshot: Snapshot): SnapshotProtocol[] {
 }
 
 /**
- * Fit the radar-2 power law from the snapshot's own live-token protocols, deterministically.
- * Also computes the leave-one-out validation (one OLS refit per held-out protocol, cheap at
- * this sample size) and the flat 0.25 x TVL baseline's errors on the same held-out protocols.
+ * Fit the radar-3 model from the snapshot's own live-token protocols, deterministically: the
+ * OLS power law, then the category adjustments of the full fit. Also computes the leave-one-out
+ * validation (one refit per held-out protocol, with the category residuals and adjustments
+ * refitted inside each fold) for the shipped model and for the three models it is compared
+ * against, and the prediction interval from the shipped model's leave-one-out residuals.
  */
 export function fitPowerLaw(snapshot: Snapshot): PowerLawFit {
   const sample = fitSample(snapshot);
@@ -256,15 +325,42 @@ export function fitPowerLaw(snapshot: Snapshot): PowerLawFit {
     ssTot += (ys[i]! - my) ** 2;
   }
   const rSquared = ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  const fullAdj = categoryAdjustments(sample, a, b, SHRINK_K);
   const looErrors: number[] = [];
   const flatErrors: number[] = [];
+  const shrinkErrors: number[] = [];
+  const shrinkResiduals: number[] = [];
+  const compsErrors: number[] = [];
   for (let i = 0; i < sample.length; i++) {
     const trainXs = xs.filter((_, j) => j !== i);
     const trainYs = ys.filter((_, j) => j !== i);
     const held = ols(trainXs, trainYs);
     looErrors.push(Math.abs(ys[i]! - (held.a + held.b * xs[i]!)));
     flatErrors.push(Math.abs(ys[i]! - Math.log(sample[i]!.tvl_usd * 0.25)));
+    const train = sample.filter((_, j) => j !== i);
+    const foldAdj = categoryAdjustments(train, held.a, held.b, SHRINK_K);
+    const adj = foldAdj.get(categoryKey(sample[i]!))?.adj ?? 0;
+    const shrinkResidual = ys[i]! - (held.a + held.b * xs[i]! + adj);
+    shrinkResiduals.push(shrinkResidual);
+    shrinkErrors.push(Math.abs(shrinkResidual));
+    // The category-median comps model: the category's median cap/TVL, shrunk toward the
+    // training set's global median with weight n / (n + CATEGORY_MEDIAN_SHRINK).
+    const ratios = train.map((p) => p.mcap_usd! / p.tvl_usd);
+    const globalMedian = median(ratios);
+    const sameCat = train.filter((p) => categoryKey(p) === categoryKey(sample[i]!)).map((p) => p.mcap_usd! / p.tvl_usd);
+    let compsRatio = globalMedian;
+    if (sameCat.length > 0) {
+      const w = sameCat.length / (sameCat.length + CATEGORY_MEDIAN_SHRINK);
+      compsRatio = w * median(sameCat) + (1 - w) * globalMedian;
+    }
+    compsErrors.push(Math.abs(ys[i]! - Math.log(sample[i]!.tvl_usd * compsRatio)));
   }
+  const sortedResiduals = [...shrinkResiduals].sort((x, y) => x - y);
+  const q25 = quantileFloor(sortedResiduals, 0.25);
+  const q75 = quantileFloor(sortedResiduals, 0.75);
+  const inside = shrinkResiduals.filter((r) => r >= q25 && r <= q75).length;
+  const categoryAdj: Record<string, { n: number; adj: number }> = {};
+  for (const [key, entry] of fullAdj) categoryAdj[key] = { n: entry.n, adj: entry.adj };
   return {
     a,
     b,
@@ -274,20 +370,30 @@ export function fitPowerLaw(snapshot: Snapshot): PowerLawFit {
     loo_median_abs_log_error: round6(median(looErrors)),
     flat_025_mean_abs_log_error: round6(flatErrors.reduce((s, e) => s + e, 0) / flatErrors.length),
     flat_025_median_abs_log_error: round6(median(flatErrors)),
+    shrink_k: SHRINK_K,
+    shrink_loo_mean_abs_log_error: round6(shrinkErrors.reduce((s, e) => s + e, 0) / shrinkErrors.length),
+    shrink_loo_median_abs_log_error: round6(median(shrinkErrors)),
+    category_median_mean_abs_log_error: round6(compsErrors.reduce((s, e) => s + e, 0) / compsErrors.length),
+    category_median_median_abs_log_error: round6(median(compsErrors)),
+    interval: { q25: round6(q25), q75: round6(q75), coverage: round6(inside / shrinkResiduals.length) },
+    category_adj: categoryAdj,
   };
 }
 
 /** The base value, the multipliers and the implied value one protocol gets under `model` and `fit`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, fit: PowerLawFit): { implied: number; baseValue: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants, fit: PowerLawFit): { implied: number; baseValue: number; shrinkAdj: number; categoryLiveN: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const base = Math.exp(fit.a) * Math.pow(protocol.tvl_usd, fit.b);
+  const adjEntry = fit.category_adj[categoryKey(protocol)];
+  const shrinkAdj = adjEntry?.adj ?? 0;
+  const categoryLiveN = adjEntry?.n ?? 0;
+  const base = Math.exp(fit.a + fit.b * Math.log(protocol.tvl_usd) + shrinkAdj);
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, baseValue: base, growthPct, growthMult, maturityMult, age };
+  return { implied, baseValue: base, shrinkAdj, categoryLiveN, growthPct, growthMult, maturityMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -335,8 +441,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, baseValue, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, fit);
-    return { p, implied, baseValue, growthPct, growthMult, maturityMult, age };
+    const { implied, baseValue, shrinkAdj, categoryLiveN, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, fit);
+    // The row's P25-P75 range: its implied value scaled by the fit's residual quartiles.
+    const valueLow = Math.min(implied, Math.round(implied * Math.exp(fit.interval.q25)));
+    const valueHigh = Math.max(implied, Math.round(implied * Math.exp(fit.interval.q75)));
+    return { p, implied, valueLow, valueHigh, baseValue, shrinkAdj, categoryLiveN, growthPct, growthMult, maturityMult, age };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -354,11 +463,15 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, fi
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    value_low_usd: s.valueLow,
+    value_high_usd: s.valueHigh,
     model: {
       fit_a: fit.a,
       fit_b: fit.b,
       fit_n: fit.n,
       base_value_usd: s.baseValue,
+      shrink_adj: s.shrinkAdj,
+      category_live_n: s.categoryLiveN,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -508,6 +621,10 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    value_low_usd: row.value_low_usd,
+    value_high_usd: row.value_high_usd,
+    shrink_adj: row.model.shrink_adj,
+    category_live_n: row.model.category_live_n,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
   };

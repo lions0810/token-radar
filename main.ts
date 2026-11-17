@@ -1,4 +1,4 @@
-// Token Radar entry point (radar-2). Node 22, standard library only, no network.
+// Token Radar entry point (radar-3). Node 22, standard library only, no network.
 //
 // What a run does, in order:
 //   1. reads the sealed snapshot (--input <file|dir>, default /input/snapshot.json),
