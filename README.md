@@ -1,5 +1,11 @@
 # Token Radar — radar-2
 
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/lions0810/token-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/lions0810/token-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+
+An entry to make.fun's [“Build the best token launch radar” bounty](https://make.fun/bounty/token-radar-01) ($1,325 in USDC).
+
 A token launch radar for the make.fun `token-radar-01` competition. It reads the sealed
 DefiLlama snapshot, finds the protocols that record no token, and ranks them by what a
 token launch would be worth — with a model that is fitted to the snapshot itself and
